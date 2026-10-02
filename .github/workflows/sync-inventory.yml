@@ -1,0 +1,31 @@
+name: Sync inventory
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: inventory-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Download BI inventory and push to cloud
+        env:
+          BI_STORAGE_STATE_B64: ${{ secrets.BI_STORAGE_STATE_B64 }}
+          BI_PAGE_URL: ${{ secrets.BI_PAGE_URL }}
+          BI_EXPORT_URL: ${{ secrets.BI_EXPORT_URL }}
+          SCF_UPLOAD_URL: ${{ secrets.SCF_UPLOAD_URL }}
+          SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
+        run: python sync_inventory.py

@@ -9,6 +9,9 @@ concurrency:
   group: inventory-sync
   cancel-in-progress: false
 
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -29,3 +32,16 @@ jobs:
           SCF_UPLOAD_URL: ${{ secrets.SCF_UPLOAD_URL }}
           SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
         run: python sync_inventory.py
+      - name: Keep scheduled workflow active
+        shell: bash
+        run: |
+          month="$(date -u +%Y-%m)"
+          current="$(cat .github/keepalive 2>/dev/null || true)"
+          if [ "$current" != "$month" ]; then
+            printf '%s\n' "$month" > .github/keepalive
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/keepalive
+            git commit -m "Keep scheduled inventory sync active"
+            git push
+          fi

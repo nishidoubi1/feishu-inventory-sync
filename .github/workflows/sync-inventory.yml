@@ -18,6 +18,14 @@ jobs:
     timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
+      - name: Restore refreshed BI login state
+        id: restore-bi-auth
+        uses: actions/cache/restore@v4
+        with:
+          path: .auth
+          key: bi-auth-${{ github.run_id }}
+          restore-keys: |
+            bi-auth-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -27,11 +35,18 @@ jobs:
       - name: Download BI inventory and push to cloud
         env:
           BI_STORAGE_STATE_B64: ${{ secrets.BI_STORAGE_STATE_B64 }}
+          BI_STATE_PATH: .auth/storage-state.json
           BI_PAGE_URL: ${{ secrets.BI_PAGE_URL }}
           BI_EXPORT_URL: ${{ secrets.BI_EXPORT_URL }}
           SCF_UPLOAD_URL: ${{ secrets.SCF_UPLOAD_URL }}
           SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
         run: python sync_inventory.py
+      - name: Save refreshed BI login state
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: .auth
+          key: bi-auth-${{ github.run_id }}
       - name: Keep scheduled workflow active
         shell: bash
         run: |

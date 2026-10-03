@@ -19,14 +19,22 @@ def required(name: str) -> str:
     return value
 
 
+def prepare_state_path(temp_dir: str) -> Path:
+    """优先使用工作流缓存中的登录状态；首次运行再用 Secret 初始化。"""
+    configured = os.environ.get("BI_STATE_PATH", "").strip()
+    state_path = Path(configured) if configured else Path(temp_dir) / "state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    if not state_path.exists():
+        state_path.write_bytes(base64.b64decode(required("BI_STORAGE_STATE_B64")))
+    return state_path
+
+
 async def download_inventory() -> bytes:
-    state = base64.b64decode(required("BI_STORAGE_STATE_B64"))
     page_url = required("BI_PAGE_URL")
     export_url = required("BI_EXPORT_URL")
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        state_path = Path(temp_dir) / "state.json"
-        state_path.write_bytes(state)
+        state_path = prepare_state_path(temp_dir)
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True)
             context = await browser.new_context(storage_state=str(state_path))
@@ -50,6 +58,9 @@ async def download_inventory() -> bytes:
             )
             content = await response.body()
             status = response.status
+            if status == 200 and content.startswith(b"PK"):
+                # BI 的会话 Cookie 会滚动刷新。保存本次最新状态，让下一次云端任务继续续期。
+                await context.storage_state(path=str(state_path))
             await browser.close()
 
     if status != 200:

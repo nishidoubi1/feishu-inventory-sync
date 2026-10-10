@@ -37,7 +37,7 @@ async def login_if_needed(page, page_url: str) -> None:
         raise RuntimeError("BI login page was not recognized")
     await fields.nth(0).fill(username)
     await fields.nth(1).fill(password)
-    await page.get_by_text("登录", exact=True).click()
+    await page.get_by_text("登录").first.click()
     await page.wait_for_timeout(5000)
     cookies = await page.context.cookies()
     if not any(c["name"] == "fine_auth_token" and "tcl.com" in c["domain"] for c in cookies):

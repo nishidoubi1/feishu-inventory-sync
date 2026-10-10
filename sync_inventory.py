@@ -19,50 +19,46 @@ def required(name: str) -> str:
     return value
 
 
-def prepare_state_path(temp_dir: str) -> Path:
-    """优先使用工作流缓存中的登录状态；首次运行再用 Secret 初始化。"""
-    configured = os.environ.get("BI_STATE_PATH", "").strip()
-    state_path = Path(configured) if configured else Path(temp_dir) / "state.json"
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    if not state_path.exists():
-        state_path.write_bytes(base64.b64decode(required("BI_STORAGE_STATE_B64")))
-    return state_path
+def login_credentials() -> tuple[str, str]:
+    raw = required("BI_LOGIN")
+    lines = raw.splitlines()
+    if len(lines) < 2 or not lines[0].strip() or not lines[1].strip():
+        raise RuntimeError("BI_LOGIN must contain account on line 1 and password on line 2")
+    return lines[0].strip(), lines[1].strip()
+
+
+async def login_if_needed(page, page_url: str) -> None:
+    username, password = login_credentials()
+    await page.goto(page_url, wait_until="domcontentloaded", timeout=120_000)
+    await page.wait_for_timeout(3000)
+    cookies = await page.context.cookies()
+    if any(c["name"] == "fine_auth_token" and "tcl.com" in c["domain"] for c in cookies):
+        return
+    fields = page.locator("input")
+    if await fields.count() < 2:
+        raise RuntimeError("BI login page was not recognized")
+    await fields.nth(0).fill(username)
+    await fields.nth(1).fill(password)
+    await page.get_by_text("登录", exact=True).click()
+    await page.wait_for_timeout(5000)
+    cookies = await page.context.cookies()
+    if not any(c["name"] == "fine_auth_token" and "tcl.com" in c["domain"] for c in cookies):
+        raise RuntimeError("BI login failed; check BI_LOGIN")
 
 
 async def download_inventory() -> bytes:
     page_url = required("BI_PAGE_URL")
     export_url = required("BI_EXPORT_URL")
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        state_path = prepare_state_path(temp_dir)
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
-            context = await browser.new_context(storage_state=str(state_path))
-            page = await context.new_page()
-            await page.goto(page_url, wait_until="domcontentloaded", timeout=120_000)
-            await page.wait_for_timeout(10_000)
-
-            token = ""
-            for cookie in await context.cookies():
-                if cookie["name"] == "fine_auth_token" and "tcl.com" in cookie["domain"]:
-                    token = cookie["value"]
-                    break
-            if not token:
-                await browser.close()
-                raise RuntimeError("BI login session is unavailable")
-
-            response = await context.request.get(
-                export_url,
-                headers={"Authorization": f"Bearer {token}", "Referer": page_url},
-                timeout=120_000,
-            )
-            content = await response.body()
-            status = response.status
-            if status == 200 and content.startswith(b"PK"):
-                # BI 的会话 Cookie 会滚动刷新。保存本次最新状态，让下一次云端任务继续续期。
-                await context.storage_state(path=str(state_path))
-            await browser.close()
-
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+        await login_if_needed(page, page_url)
+        token = next(c["value"] for c in await context.cookies() if c["name"] == "fine_auth_token" and "tcl.com" in c["domain"])
+        response = await context.request.get(export_url, headers={"Authorization": f"Bearer {token}", "Referer": page_url}, timeout=120_000)
+        content = await response.body()
+        status = response.status
+        await browser.close()
     if status != 200:
         raise RuntimeError(f"BI export failed with HTTP {status}")
     if not content.startswith(b"PK"):
@@ -71,19 +67,8 @@ async def download_inventory() -> bytes:
 
 
 def upload_inventory(content: bytes) -> dict:
-    payload = json.dumps(
-        {"content_base64": base64.b64encode(content).decode("ascii")},
-        separators=(",", ":"),
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        required("SCF_UPLOAD_URL"),
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {required('SYNC_SECRET')}",
-            "Content-Type": "application/json",
-        },
-    )
+    payload = json.dumps({"content_base64": base64.b64encode(content).decode("ascii")}, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(required("SCF_UPLOAD_URL"), data=payload, method="POST", headers={"Authorization": f"Bearer {required('SYNC_SECRET')}", "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=180) as response:
             result = json.loads(response.read().decode("utf-8"))
@@ -95,15 +80,8 @@ def upload_inventory(content: bytes) -> dict:
 
 
 async def main() -> None:
-    content = await download_inventory()
-    result = upload_inventory(content)
-    print(
-        "Inventory sync complete: "
-        f"source={result.get('source', 0)}, "
-        f"created={result.get('created', 0)}, "
-        f"updated={result.get('updated', 0)}, "
-        f"batch={result.get('batch', '')}"
-    )
+    result = upload_inventory(await download_inventory())
+    print(f"Inventory sync complete: source={result.get('source', 0)}, created={result.get('created', 0)}, updated={result.get('updated', 0)}, batch={result.get('batch', '')}")
 
 
 if __name__ == "__main__":

@@ -4,10 +4,8 @@ import asyncio
 import base64
 import json
 import os
-import tempfile
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 from playwright.async_api import async_playwright
 
@@ -34,7 +32,7 @@ async def login_if_needed(page, page_url: str) -> None:
     cookies = await page.context.cookies()
     if any(c["name"] == "fine_auth_token" and "tcl.com" in c["domain"] for c in cookies):
         return
-    fields = page.locator("input")
+    fields = page.locator("input:visible")
     if await fields.count() < 2:
         raise RuntimeError("BI login page was not recognized")
     await fields.nth(0).fill(username)

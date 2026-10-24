@@ -34,6 +34,7 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - name: Download BI inventory and push to cloud
         env:
+          BI_LOGIN: ${{ secrets.BI_LOGIN }}
           BI_STORAGE_STATE_B64: ${{ secrets.BI_STORAGE_STATE_B64 }}
           BI_STATE_PATH: .auth/storage-state.json
           BI_PAGE_URL: ${{ secrets.BI_PAGE_URL }}

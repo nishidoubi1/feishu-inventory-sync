@@ -49,49 +49,63 @@ async def download_inventory() -> bytes:
             browser = await playwright.chromium.launch(headless=True)
             context_kwargs = {"storage_state": str(state_path)} if state_path.exists() else {}
             context = await browser.new_context(**context_kwargs)
+            async def find_token(browser_context) -> str:
+                for cookie in await browser_context.cookies():
+                    if cookie["name"] == "fine_auth_token" and "tcl.com" in cookie["domain"]:
+                        return cookie["value"]
+                return ""
+
+            async def export_with_token(browser_context, token: str):
+                if not token:
+                    return None, b""
+                result = await browser_context.request.get(
+                    export_url,
+                    headers={"Authorization": f"Bearer {token}", "Referer": page_url},
+                    timeout=120_000,
+                )
+                return result, await result.body()
+
+            # 先尝试缓存会话。Cookie 存在不代表仍有效，必须以实际 Excel 响应判定。
             page = await context.new_page()
             await page.goto(page_url, wait_until="domcontentloaded", timeout=120_000)
             await page.wait_for_timeout(10_000)
+            response, content = await export_with_token(context, await find_token(context))
 
-            token = ""
-            for cookie in await context.cookies():
-                if cookie["name"] == "fine_auth_token" and "tcl.com" in cookie["domain"]:
-                    token = cookie["value"]
-                    break
-            if not token and os.environ.get("BI_LOGIN", "").strip():
-                username, password = login_credentials()
-                fields = page.locator("input:visible")
+            # 旧 Cookie 即使还在缓存里，也可能已失效并返回登录页。此时丢弃缓存上下文，
+            # 用 BI_LOGIN 建立全新会话后重试一次，成功才保存新的状态。
+            if (response is None or response.status != 200 or not content.startswith(b"PK")) and os.environ.get("BI_LOGIN", "").strip():
+                fresh_context = await browser.new_context()
+                fresh_page = await fresh_context.new_page()
+                await fresh_page.goto(page_url, wait_until="domcontentloaded", timeout=120_000)
+                await fresh_page.wait_for_timeout(8_000)
+                fields = fresh_page.locator("input:visible")
                 if await fields.count() < 2:
                     await browser.close()
-                    raise RuntimeError("BI login page was not recognized")
+                    raise RuntimeError("BI login page was not recognized after cached session failed")
+                username, password = login_credentials()
                 await fields.nth(0).fill(username)
                 await fields.nth(1).fill(password)
                 await fields.nth(1).press("Enter")
-                await page.wait_for_timeout(8_000)
-                for cookie in await context.cookies():
-                    if cookie["name"] == "fine_auth_token" and "tcl.com" in cookie["domain"]:
-                        token = cookie["value"]
-                        break
-            if not token:
-                await browser.close()
-                raise RuntimeError("BI login session is unavailable; configure BI_LOGIN or BI_STORAGE_STATE_B64")
-
-            response = await context.request.get(
-                export_url,
-                headers={"Authorization": f"Bearer {token}", "Referer": page_url},
-                timeout=120_000,
-            )
-            content = await response.body()
-            status = response.status
-            if status == 200 and content.startswith(b"PK"):
-                # BI 的会话 Cookie 会滚动刷新。保存本次最新状态，让下一次云端任务继续续期。
+                await fresh_page.wait_for_timeout(8_000)
+                response, content = await export_with_token(fresh_context, await find_token(fresh_context))
+                if response is not None and response.status == 200 and content.startswith(b"PK"):
+                    await fresh_context.storage_state(path=str(state_path))
+                await fresh_context.close()
+            elif response is not None and response.status == 200 and content.startswith(b"PK"):
+                # 只有确认下载到有效 Excel 后才覆盖登录状态缓存。
                 await context.storage_state(path=str(state_path))
+
+            status = response.status if response is not None else 0
+            content_type = response.headers.get("content-type", "unknown") if response is not None else "no-response"
             await browser.close()
 
     if status != 200:
-        raise RuntimeError(f"BI export failed with HTTP {status}")
+        raise RuntimeError(f"BI export failed with HTTP {status} (content-type {content_type})")
     if not content.startswith(b"PK"):
-        raise RuntimeError("BI export did not return an Excel file")
+        raise RuntimeError(
+            "BI export did not return an Excel file "
+            f"(HTTP {status}, content-type {content_type}, bytes {len(content)})"
+        )
     return content
 
 

@@ -25,8 +25,18 @@ def prepare_state_path(temp_dir: str) -> Path:
     state_path = Path(configured) if configured else Path(temp_dir) / "state.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
     if not state_path.exists():
-        state_path.write_bytes(base64.b64decode(required("BI_STORAGE_STATE_B64")))
+        encoded = os.environ.get("BI_STORAGE_STATE_B64", "").strip()
+        if encoded:
+            state_path.write_bytes(base64.b64decode(encoded))
     return state_path
+
+
+def login_credentials() -> tuple[str, str]:
+    raw = required("BI_LOGIN")
+    lines = raw.splitlines()
+    if len(lines) < 2 or not lines[0].strip() or not lines[1].strip():
+        raise RuntimeError("BI_LOGIN must contain account on line 1 and password on line 2")
+    return lines[0].strip(), lines[1].strip()
 
 
 async def download_inventory() -> bytes:
@@ -37,7 +47,8 @@ async def download_inventory() -> bytes:
         state_path = prepare_state_path(temp_dir)
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True)
-            context = await browser.new_context(storage_state=str(state_path))
+            context_kwargs = {"storage_state": str(state_path)} if state_path.exists() else {}
+            context = await browser.new_context(**context_kwargs)
             page = await context.new_page()
             await page.goto(page_url, wait_until="domcontentloaded", timeout=120_000)
             await page.wait_for_timeout(10_000)
@@ -47,9 +58,23 @@ async def download_inventory() -> bytes:
                 if cookie["name"] == "fine_auth_token" and "tcl.com" in cookie["domain"]:
                     token = cookie["value"]
                     break
+            if not token and os.environ.get("BI_LOGIN", "").strip():
+                username, password = login_credentials()
+                fields = page.locator("input:visible")
+                if await fields.count() < 2:
+                    await browser.close()
+                    raise RuntimeError("BI login page was not recognized")
+                await fields.nth(0).fill(username)
+                await fields.nth(1).fill(password)
+                await fields.nth(1).press("Enter")
+                await page.wait_for_timeout(8_000)
+                for cookie in await context.cookies():
+                    if cookie["name"] == "fine_auth_token" and "tcl.com" in cookie["domain"]:
+                        token = cookie["value"]
+                        break
             if not token:
                 await browser.close()
-                raise RuntimeError("BI login session is unavailable")
+                raise RuntimeError("BI login session is unavailable; configure BI_LOGIN or BI_STORAGE_STATE_B64")
 
             response = await context.request.get(
                 export_url,

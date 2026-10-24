@@ -1,0 +1,63 @@
+name: Sync inventory
+
+on:
+  schedule:
+    - cron: "2-57/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: inventory-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore refreshed BI login state
+        id: restore-bi-auth
+        uses: actions/cache/restore@v4
+        with:
+          path: .auth
+          key: bi-auth-${{ github.run_id }}
+          restore-keys: |
+            bi-auth-
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Download BI inventory and push to cloud
+        env:
+          BI_LOGIN: ${{ secrets.BI_LOGIN }}
+          BI_STORAGE_STATE_B64: ${{ secrets.BI_STORAGE_STATE_B64 }}
+          BI_STATE_PATH: .auth/storage-state.json
+          BI_PAGE_URL: ${{ secrets.BI_PAGE_URL }}
+          BI_EXPORT_URL: ${{ secrets.BI_EXPORT_URL }}
+          SCF_UPLOAD_URL: ${{ secrets.SCF_UPLOAD_URL }}
+          SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
+        run: python sync_inventory.py
+      - name: Save refreshed BI login state
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: .auth
+          key: bi-auth-${{ github.run_id }}
+      - name: Keep scheduled workflow active
+        shell: bash
+        run: |
+          month="$(date -u +%Y-%m)"
+          current="$(cat .github/keepalive 2>/dev/null || true)"
+          if [ "$current" != "$month" ]; then
+            printf '%s\n' "$month" > .github/keepalive
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/keepalive
+            git commit -m "Keep scheduled inventory sync active"
+            git push
+          fi

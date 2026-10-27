@@ -110,24 +110,30 @@ async def download_inventory() -> bytes:
 
 
 def upload_inventory(content: bytes) -> dict:
-    payload = json.dumps(
-        {"content_base64": base64.b64encode(content).decode("ascii")},
-        separators=(",", ":"),
-    ).encode("utf-8")
+    if not content.startswith(b"PK"):
+        raise RuntimeError("Refusing to upload inventory export: response is not an Excel file")
+    if len(content) > 5 * 1024 * 1024:
+        raise RuntimeError(
+            f"Inventory Excel is too large for the cloud upload endpoint ({len(content)} bytes; limit is 5 MiB)"
+        )
     request = urllib.request.Request(
         required("SCF_UPLOAD_URL"),
-        data=payload,
+        data=content,
         method="POST",
         headers={
             "Authorization": f"Bearer {required('SYNC_SECRET')}",
-            "Content-Type": "application/json",
+            "Content-Type": "application/octet-stream",
         },
     )
     try:
         with urllib.request.urlopen(request, timeout=180) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"Cloud upload failed with HTTP {exc.code}") from exc
+        detail = exc.read(1000).decode("utf-8", errors="replace").strip()
+        message = f"Cloud upload failed with HTTP {exc.code}"
+        if detail:
+            message += f": {detail}"
+        raise RuntimeError(message) from exc
     if not result.get("ok"):
         raise RuntimeError("Cloud upload did not complete")
     return result["result"]
@@ -147,3 +153,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+

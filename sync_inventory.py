@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import os
 import tempfile
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -116,6 +118,19 @@ def upload_inventory(content: bytes) -> dict:
         raise RuntimeError(
             f"Inventory Excel is too large for the cloud upload endpoint ({len(content)} bytes; limit is 5 MiB)"
         )
+    # Tencent BI exports can carry ZIP member offsets that Python 3.9 in SCF
+    # interprets as negative seeks. Rebuild the XLSX archive with normalized
+    # member offsets before sending it to the function.
+    source = io.BytesIO(content)
+    normalized = io.BytesIO()
+    try:
+        with zipfile.ZipFile(source, "r") as original:
+            with zipfile.ZipFile(normalized, "w", compression=zipfile.ZIP_DEFLATED) as rebuilt:
+                for info in original.infolist():
+                    rebuilt.writestr(info, original.read(info.filename))
+    except (OSError, ValueError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        raise RuntimeError(f"BI export is not a readable Excel archive: {type(exc).__name__}: {exc}") from exc
+    content = normalized.getvalue()
     request = urllib.request.Request(
         required("SCF_UPLOAD_URL"),
         data=content,

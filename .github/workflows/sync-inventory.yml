@@ -1,8 +1,6 @@
 name: Sync inventory
 
 on:
-  schedule:
-    - cron: "1-56/5 * * * *"
   workflow_dispatch:
 
 concurrency:

@@ -133,11 +133,11 @@ def upload_inventory(content: bytes) -> dict:
     content = normalized.getvalue()
     request = urllib.request.Request(
         required("SCF_UPLOAD_URL"),
-        data=content,
+        data=json.dumps({"content_base64": base64.b64encode(content).decode("ascii")}, separators=(",", ":")).encode("utf-8"),
         method="POST",
         headers={
             "Authorization": f"Bearer {required('SYNC_SECRET')}",
-            "Content-Type": "application/octet-stream",
+            "Content-Type": "application/json; charset=utf-8",
         },
     )
     try:

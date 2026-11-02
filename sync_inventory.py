@@ -6,6 +6,8 @@ import io
 import json
 import os
 import tempfile
+import time
+import socket
 import urllib.error
 import urllib.request
 import zipfile
@@ -140,15 +142,29 @@ def upload_inventory(content: bytes) -> dict:
             "Content-Type": "application/json; charset=utf-8",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=180) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read(1000).decode("utf-8", errors="replace").strip()
-        message = f"Cloud upload failed with HTTP {exc.code}"
-        if detail:
-            message += f": {detail}"
-        raise RuntimeError(message) from exc
+    result = None
+    for attempt in range(1, 5):
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read(1000).decode("utf-8", errors="replace").strip()
+            message = f"Cloud upload failed with HTTP {exc.code}"
+            if detail:
+                message += f": {detail}"
+            raise RuntimeError(message) from exc
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+            if attempt == 4:
+                raise RuntimeError(
+                    f"Cloud upload failed after {attempt} attempts: {type(exc).__name__}: {exc}"
+                ) from exc
+            delay = 5 * (2 ** (attempt - 1))
+            print(
+                f"Cloud upload connection failed on attempt {attempt}/4 "
+                f"({type(exc).__name__}); retrying in {delay}s"
+            )
+            time.sleep(delay)
     if not result.get("ok"):
         raise RuntimeError("Cloud upload did not complete")
     return result["result"]
